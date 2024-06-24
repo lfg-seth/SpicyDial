@@ -1,6 +1,7 @@
 import os
 import shutil
 from tqdm import tqdm
+from settings import SETTINGS
 
 def clean_grouped_folders(grouped_folder, original_folder, thumbnail_ext=".thumb"):
     for group_name in tqdm(os.listdir(grouped_folder), desc="Cleaning Groups"):
@@ -38,8 +39,8 @@ def clean_grouped_folders(grouped_folder, original_folder, thumbnail_ext=".thumb
         print(f"Removed empty group folder: {group_path}")
 
 def main():
-    grouped_folder = r'C:\\Users\\Setheth\\OneDrive - LFG Automotive\\Pictures\\Grouped'
-    original_folder = r'C:\\Users\\Setheth\\OneDrive - LFG Automotive\\Pictures\\SmallTest'
+    grouped_folder = SETTINGS['output_folder']
+    original_folder = SETTINGS['folder_path']
     
     clean_grouped_folders(grouped_folder, original_folder)
 

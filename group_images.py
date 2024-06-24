@@ -5,36 +5,42 @@ import shutil
 import subprocess
 from skimage.metrics import structural_similarity as ssim
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from settings import SETTINGS
 
 # Settings
-SETTINGS = {
-    'folder_path': r'C:\\Users\\Setheth\\OneDrive - LFG Automotive\\Pictures\\Babygorl',
-    'output_folder': r'C:\\Users\\Setheth\\OneDrive - LFG Automotive\\Pictures\\Babygorl\\Grouped',
-    'thumbnail_size': (200, 200),
-    'thumbnail_ext': '.thumb.jpg',
-    'ssim_threshold': 0.4,
-}
 
-def load_images_and_create_thumbnails(folder, thumbnail_size=(200, 200), thumbnail_ext=".thumb.jpg"):
+
+def load_images_and_create_thumbnails(folder, thumbnail_size=(100, 100), thumbnail_ext=".thumb.jpg"):
     thumbnails = []
     file_list = [f for f in os.listdir(folder) if not f.endswith(thumbnail_ext)]  # Exclude thumbnails
-    for filename in tqdm(file_list, desc="Creating Thumbnails"):
-        thumbnail_filename = os.path.splitext(filename)[0] + thumbnail_ext
-        thumbnail_path = os.path.join(folder, thumbnail_filename)
-        
-        if not os.path.exists(thumbnail_path):
-            img = cv2.imread(os.path.join(folder, filename))
-            if img is not None:
-                thumbnail = create_thumbnail(img, thumbnail_size)
-                cv2.imwrite(thumbnail_path, thumbnail)
-                set_file_hidden(thumbnail_path)  # Set the thumbnail file to hidden
-                thumbnails.append((filename, thumbnail_filename, thumbnail))
-        else:
-            thumbnails.append((filename, thumbnail_filename, cv2.imread(thumbnail_path)))
+
+    with ThreadPoolExecutor(max_workers=SETTINGS['max_workers']) as executor:
+        futures = {executor.submit(create_thumbnail_and_save, folder, filename, thumbnail_size, thumbnail_ext): filename for filename in file_list}
+
+        for future in tqdm(futures, desc="Creating Thumbnails", total=len(file_list)):
+            result = future.result()
+            if result:
+                thumbnails.append(result)
+    
     print(f"Loaded {len(thumbnails)} thumbnails from {folder}")
     return thumbnails
 
-def create_thumbnail(image, size=(200, 200)):
+def create_thumbnail_and_save(folder, filename, thumbnail_size, thumbnail_ext):
+    thumbnail_filename = os.path.splitext(filename)[0] + thumbnail_ext
+    thumbnail_path = os.path.join(folder, thumbnail_filename)
+
+    if not os.path.exists(thumbnail_path):
+        img = cv2.imread(os.path.join(folder, filename))
+        if img is not None:
+            thumbnail = create_thumbnail(img, thumbnail_size)
+            cv2.imwrite(thumbnail_path, thumbnail)
+            set_file_hidden(thumbnail_path)  # Set the thumbnail file to hidden
+            return (filename, thumbnail_filename, thumbnail)
+    else:
+        return (filename, thumbnail_filename, cv2.imread(thumbnail_path))
+
+def create_thumbnail(image, size=(100, 100)):
     thumbnail = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
     return thumbnail
 
@@ -43,29 +49,47 @@ def set_file_hidden(filepath):
     subprocess.call(['attrib', '+h', filepath])
 
 def compare_images(imageA, imageB):
-    # Convert images to grayscale
-    grayA = cv2.cvtColor(imageA, cv2.COLOR_BGR2GRAY)
-    grayB = cv2.cvtColor(imageB, cv2.COLOR_BGR2GRAY)
-    # Compute SSIM between two images
-    score, diff = ssim(grayA, grayB, full=True)
+    imageA = cv2.cvtColor(imageA, cv2.COLOR_BGR2GRAY)
+    imageB = cv2.cvtColor(imageB, cv2.COLOR_BGR2GRAY)
+    if SETTINGS['use_gaussian_blur']:
+        imageA = cv2.GaussianBlur(imageA, SETTINGS['gaussian_kernel_size'], 0)
+        imageB = cv2.GaussianBlur(imageB, SETTINGS['gaussian_kernel_size'], 0)
+    score = ssim(imageA, imageB, full=True)[0]
     return score
 
-def group_similar_images(images, threshold=0.4):
+
+def compare_images_orb(imageA, imageB):
+    orb = cv2.ORB_create()
+    kpA, desA = orb.detectAndCompute(imageA, None)
+    kpB, desB = orb.detectAndCompute(imageB, None)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(desA, desB)
+    matches = sorted(matches, key=lambda x: x.distance)
+    return len(matches)
+
+def group_similar_images(images, threshold=0.5):
     groups = []
     total_images = len(images)
     processed_images = 0
-    for base_image in tqdm(images.copy(), desc="Grouping Images"):
-        if base_image not in images:
-            continue
-        images.remove(base_image)
-        group = [base_image]
-        for other_image in images[:]:
-            score = compare_images(base_image[2], other_image[2])
-            if score > threshold:
-                group.append(other_image)
-                images.remove(other_image)
-        groups.append(group)
-        processed_images += 1
+
+    with ThreadPoolExecutor(max_workers=SETTINGS['max_workers']) as executor:
+        with tqdm(total=total_images, desc="Grouping Images") as pbar:
+            while images:
+                base_image = images.pop(0)
+                group = [base_image]
+                futures = {executor.submit(compare_images, base_image[2], other_image[2]): other_image for other_image in images}
+
+                for future in futures:
+                    score = future.result()
+                    other_image = futures[future]
+                    if score > threshold:
+                        group.append(other_image)
+                        images.remove(other_image)
+                
+                groups.append(group)
+                processed_images += 1
+                pbar.update(len(group))
+
     return groups
 
 def move_images_to_groups(groups, base_folder, src_folder, thumbnail_ext=".thumb.jpg"):
